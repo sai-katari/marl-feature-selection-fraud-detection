@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, f1_score
 from imblearn.over_sampling import RandomOverSampler
 import xgboost as xgb
 import warnings
@@ -38,7 +38,7 @@ clf_all = get_xgb()
 clf_all.fit(X_res, y_res.values.ravel())
 pred_all = clf_all.predict(X_test)
 cm_all = confusion_matrix(y_test.values.ravel(), pred_all)
-f1_all = 0.9425  # from actual run
+f1_all = f1_score(y_test.values.ravel(), pred_all, average='macro')
 
 # Train on MARL-selected 19 features
 print("Training MARL model (19 features)...")
@@ -46,8 +46,10 @@ clf_marl = get_xgb()
 clf_marl.fit(X_res[marl_features], y_res.values.ravel())
 pred_marl = clf_marl.predict(X_test[marl_features])
 cm_marl = confusion_matrix(y_test.values.ravel(), pred_marl)
-f1_marl = 0.9569  # from actual run
+f1_marl = f1_score(y_test.values.ravel(), pred_marl, average='macro')
 
+print(f"Baseline F1: {round(f1_all, 4)}")
+print(f"MARL F1: {round(f1_marl, 4)}")
 print("Building plots...")
 
 # F1 scores recorded per episode from the actual 500-episode training run
@@ -135,19 +137,19 @@ episode_f1 = {
     495:95.69,496:95.69,497:95.69,498:95.69,499:95.69
 }
 
-episodes  = list(range(500))
+episodes = list(range(500))
 f1_curve  = [episode_f1[e] for e in episodes]
 
 plt.rcParams.update({'font.size': 11, 'font.family': 'DejaVu Sans'})
 c_marl = '#1565C0'
 
-# Plot 1: Training curve - shows how F1 evolved across episodes
+# Plot 1: Training curve
 fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(episodes, f1_curve, color=c_marl, linewidth=1.5, alpha=0.85, label='MARL F1')
 ax.axhline(y=f1_all * 100, color='red', linestyle='--',
-           linewidth=1.3, label=f'All Features Baseline ({f1_all})')
-ax.axhline(y=95.69, color='green', linestyle='--',
-           linewidth=1.3, label='MARL Converged (0.9569)')
+           linewidth=1.3, label=f'All Features Baseline ({round(f1_all, 4)})')
+ax.axhline(y=f1_marl * 100, color='green', linestyle='--',
+           linewidth=1.3, label=f'MARL Converged ({round(f1_marl, 4)})')
 ax.set_xlabel('Episode')
 ax.set_ylabel('Macro F1 Score (%)')
 ax.set_title('MARL Training Curve — Credit Card Fraud Detection', fontweight='bold')
@@ -161,7 +163,6 @@ print("Saved: plot_training_curve.png")
 plt.close()
 
 # Plot 2: Side-by-side confusion matrices
-# Shows how MARL selection compares to using all features
 fig2, axes2 = plt.subplots(1, 2, figsize=(12, 4))
 fig2.suptitle('Confusion Matrices — All Features vs MARL Selected',
               fontsize=13, fontweight='bold')
@@ -182,8 +183,7 @@ plt.savefig('plot_confusion_matrix.png', dpi=150, bbox_inches='tight')
 print("Saved: plot_confusion_matrix.png")
 plt.close()
 
-# Plot 3: Feature importance from XGBoost trained on MARL-selected features
-# V14 dominates - consistent with fraud detection literature
+# Plot 3: Feature importance — V14 dominates by a wide margin
 print("Computing feature importance...")
 importances = clf_marl.feature_importances_
 feat_imp = pd.Series(importances, index=marl_features).sort_values(ascending=True)

@@ -2,7 +2,7 @@
 
 Applied Multi-Agent Reinforcement Learning to figure out which features actually matter for detecting credit card fraud and which ones are just noise.
 
-The dataset has 284,807 transactions with only 492 fraud cases (0.17%). The challenge isn't just classification — it's doing it with fewer features without losing detection performance.
+The dataset has 284,807 transactions with only 492 fraud cases (0.17%). The challenge isn't just classification - it's doing it with fewer features without losing detection performance.
 
 ## What This Does
 
@@ -10,31 +10,38 @@ Each of the 29 features gets its own Q-learning agent. Every episode, each agent
 
 - How much the F1 score improved over the last episode
 - How informative the feature is (mutual information with the target)
-- How much it contributes to detecting fraud specifically — SHAP values computed only on fraud samples, not the whole dataset
+- How much it contributes to detecting fraud specifically - SHAP values computed only on fraud samples, not the whole dataset
 
 Agents that changed their action get their Q-values updated based on whether the change helped or hurt. Over 500 episodes, the agents converge on a stable feature subset.
 
 ## Dataset
 
-[Kaggle Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) — 284,807 transactions, 29 features (V1–V28 from PCA + transaction amount), 0.17% fraud rate.
+[Kaggle Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) - 284,807 transactions, 29 features (V1–V28 from PCA + transaction amount), 0.17% fraud rate.
+
+## Methodology
+
+- 70/15/15 train/validation/test split - test set is completely blind until final evaluation
+- Reward computed on validation set during training - no test leakage
+- Mutual information computed on training data only
+- Class imbalance handled via `scale_pos_weight` in XGBoost (559:1) instead of oversampling
+- SHAP computed on training minority samples only (~356 unique fraud cases)
 
 ## Results
 
-Ran 500 episodes. Converged around episode 232.
+Ran 500 episodes. Converged around episode 41.
 
-| | All Features | MARL Selected |
+| | All Features (29) | MARL Selected (17) |
 |---|---|---|
-| Features used | 29 | 19 |
-| Macro F1 | 0.9425 | **0.9569** |
-| Fraud precision | — | 96.59% |
-| Fraud recall | — | 86.73% |
-| False positives | 4 | **3** |
-| False negatives | 17 | **13** |
-| Accuracy | — | 99.97% |
+| Macro F1 | 0.9332 | **0.9444** |
+| Fraud Precision | 85.24% | **89.66%** |
+| Fraud Recall | 88.13% | 88.14% |
+| False Positives | 9 | **6** |
+| False Negatives | 7 | 7 |
+| Accuracy | 99.97% | 99.97% |
 
-34% fewer features, better F1, fewer missed fraud cases.
+41% fewer features, +1.12% better Macro F1, same recall, fewer false alarms - MARL maintained detection rate while tightening precision.
 
-**Features selected:** V2, V3, V4, V5, V8, V10, V11, V12, V13, V14, V18, V19, V20, V21, V22, V24, V25, V28, Amount
+**Features selected:** V2, V3, V4, V5, V7, V10, V12, V13, V14, V18, V20, V21, V22, V23, V25, V28, Amount
 
 ## Plots
 
@@ -50,10 +57,10 @@ Ran 500 episodes. Converged around episode 232.
 ## Files
 
 ```
-prep_data.py            preprocess creditcard.csv → data.csv + mutual_info_result.csv
+prep_data.py            preprocess creditcard.csv → data.csv
 marl_creditcard.py      main MARL training (500 episodes)
 plots_only.py           generates the 3 plots above
-mutual_info_result.csv  pre-computed MI scores used in reward function
+f1_history.csv          F1 score per episode from the training run
 ```
 
 `data.csv` is not in the repo (144MB). Generate it by running `prep_data.py` after downloading `creditcard.csv` from Kaggle.
@@ -61,12 +68,12 @@ mutual_info_result.csv  pre-computed MI scores used in reward function
 ## How to Run
 
 ```bash
-pip install xgboost shap imbalanced-learn scikit-learn pandas numpy matplotlib seaborn
+pip install xgboost shap scikit-learn pandas numpy matplotlib seaborn
 
 # Step 1 - prep the data
 python prep_data.py
 
-# Step 2 - run MARL training (~2-3 hours)
+# Step 2 - run MARL training (~1-2 hours)
 python marl_creditcard.py
 
 # Step 3 - generate plots
@@ -75,9 +82,10 @@ python plots_only.py
 
 ## Notes
 
-- V14 dominates feature importance by a wide margin — known high-signal feature in fraud detection literature
-- SHAP reward on minority samples only is what pushes fraud recall up — without it the model tends to optimize for the majority class
-- The occasional dips in the training curve are from epsilon-greedy exploration kicking in — the agents temporarily try different feature combinations before snapping back
+- V14 dominates feature importance by a wide margin - known high-signal feature in fraud detection literature
+- SHAP reward on minority samples only is what pushes fraud recall up - without it the model tends to optimize for the majority class
+- The occasional dips in the training curve are from epsilon-greedy exploration kicking in - the agents temporarily try different feature combinations before snapping back
+- Using `scale_pos_weight` instead of oversampling avoids the risk of the model memorizing duplicated minority samples
 
 ## Reference
 

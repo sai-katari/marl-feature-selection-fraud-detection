@@ -3,17 +3,15 @@ import random
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from sklearn.feature_selection import mutual_info_classif
 import xgboost as xgb
-from imblearn.over_sampling import RandomOverSampler
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 
 random.seed(42)
 np.random.seed(42)
 
-# Load preprocessed data and pre-computed mutual information scores
+# Load preprocessed data
 df = pd.read_csv('data.csv', index_col=0, encoding='UTF-8')
-mutual_df = pd.read_csv('mutual_info_result.csv', index_col=0)
-mutual_df = mutual_df[mutual_df['col_name'] != 'class'].reset_index(drop=True)
 
 # Remove any duplicate columns that might have crept in during preprocessing
 drop_list = list(set(df.columns) - set(df.T.drop_duplicates(keep='first').T.columns))
@@ -22,39 +20,56 @@ df = df.drop(drop_list, axis=1)
 X = df.drop(['class'], axis=1)
 y = pd.DataFrame([0 if x == 0 else 1 for x in df['class']], columns=['class'])
 
-# Split first — test set is locked away and not touched during feature selection
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Three-way split: train / validation / test
+# Validation is used during MARL training for reward signal
+# Test set is completely blind until final evaluation
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
 
-# Fraud cases are only 0.17% of the data — oversample the minority class
-# on training data only, never on the full dataset
-oversample = RandomOverSampler(sampling_strategy='minority', random_state=123)
-X_res, y_res = oversample.fit_resample(X_train, y_train)
+# Compute mutual information on training data only
+# Using the full dataset here would leak test information into the reward signal
+print("Computing mutual information on training data...")
+mi_scores = mutual_info_classif(X_train, y_train.values.ravel(), random_state=42)
+mutual_df = pd.DataFrame({
+    'col_name': X_train.columns,
+    'mutual_info': mi_scores
+}).reset_index(drop=True)
 
-print(f"Dataset: {df.shape[0]} rows, {X.shape[1]} features")
-print(f"Class distribution after oversampling: {pd.Series(y_res['class']).value_counts().to_dict()}")
+# scale_pos_weight tells XGBoost how much to penalize missing a fraud case
+# relative to a false alarm — handles class imbalance without oversampling
+neg = len(y_train[y_train['class'] == 0])
+pos = len(y_train[y_train['class'] == 1])
+scale_pos_weight = neg / pos
+
+print(f"Dataset     : {df.shape[0]} rows, {X.shape[1]} features")
+print(f"Train       : {len(X_train)} rows ({neg} not-fraud, {pos} fraud)")
+print(f"Validation  : {len(X_val)} rows")
+print(f"Test        : {len(X_test)} rows (blind until final eval)")
+print(f"scale_pos_weight: {round(scale_pos_weight, 2)}")
 
 
 def reward_weight(input_features):
-    x_train = X_res.iloc[:, input_features]
-    x_test = X_test.iloc[:, input_features]
+    x_train = X_train.iloc[:, input_features]
+    x_val   = X_val.iloc[:, input_features]
 
     clf = xgb.XGBClassifier(
         random_state=42,
         eval_metric='logloss',
         n_estimators=100,
         max_depth=6,
-        n_jobs=-1
+        n_jobs=-1,
+        scale_pos_weight=scale_pos_weight
     )
-    clf.fit(x_train, y_res.values.ravel())
+    clf.fit(x_train, y_train.values.ravel())
 
-    pred = clf.predict(x_test)
-    f1 = f1_score(y_test.values.ravel(), pred, average='macro')
+    # Reward is computed on the validation set — test set never touched here
+    pred = clf.predict(x_val)
+    f1 = f1_score(y_val.values.ravel(), pred, average='macro')
 
-    # SHAP computed on training minority samples only — not the test set
-    # Feature selection should have no visibility into test data at any point
-    train_data = pd.concat([x_train.reset_index(drop=True),
-                            y_res.reset_index(drop=True)], axis=1)
-    minority_train = train_data[train_data['class'] == 1].drop(['class'], axis=1)
+    # SHAP computed on training minority samples only
+    # These are the unique fraud cases in X_train — fast and no leakage
+    minority_mask = y_train['class'] == 1
+    minority_train = x_train[minority_mask.values]
 
     if len(minority_train) == 0:
         shap_weight = [0.0] * len(input_features)
@@ -77,8 +92,7 @@ def get_reward(features):
 
 # Each feature gets its own Q-learning agent with two possible actions:
 # action 0 = deselect this feature, action 1 = select this feature
-# Q-values start at -1 to encourage early exploration
-num_agents = 29
+num_agents = X_train.shape[1]
 Q_values = [[-1, -1] for _ in range(num_agents)]
 
 epsilon = 0.05
@@ -89,9 +103,10 @@ alpha_decay_rate = 0.995
 num_episodes = 500
 current_actions = [0] * num_agents
 previous_action = [1] * num_agents
-
-# Set close to actual first-episode F1 so reward signal fires correctly
 previous_R = 47.0
+
+# Log F1 per episode so plots_only.py can read actual training history
+f1_history = []
 
 for episode in range(num_episodes):
     print("--------------------------------------------------")
@@ -107,6 +122,8 @@ for episode in range(num_episodes):
     selected_features = [i for i, a in enumerate(current_actions) if a == 1]
     Current_R, feature_importance, shap_weight = get_reward(selected_features)
     print("R:", Current_R)
+
+    f1_history.append({'episode': episode, 'f1': round(Current_R, 4)})
 
     # Only update agents that changed their action since last episode
     different_indices = [
@@ -153,6 +170,10 @@ for episode in range(num_episodes):
     print("alpha:", round(alpha, 6))
     print("epsilon:", round(epsilon, 6))
 
+# Save training history so plots_only.py can use actual run data
+pd.DataFrame(f1_history).to_csv('f1_history.csv', index=False)
+print("Training history saved to f1_history.csv")
+
 # Pick the final feature set based on which action each agent settled on
 last_feature = [np.argmax(Q_values[i]) for i in range(num_agents)]
 selected_features = [X_train.columns[i] for i in range(num_agents) if last_feature[i] == 1]
@@ -162,15 +183,16 @@ print("FINAL RESULTS")
 print("==================================================")
 print(f"Selected features ({len(selected_features)}): {selected_features}")
 
-# Final evaluation on test set — first time test data is used
+# Final evaluation on test set — first and only time test data is used
 clf_final = xgb.XGBClassifier(
     random_state=42,
     eval_metric='logloss',
     n_estimators=100,
     max_depth=6,
-    n_jobs=-1
+    n_jobs=-1,
+    scale_pos_weight=scale_pos_weight
 )
-clf_final.fit(X_res[selected_features], y_res.values.ravel())
+clf_final.fit(X_train[selected_features], y_train.values.ravel())
 
 pred = clf_final.predict(X_test[selected_features])
 
